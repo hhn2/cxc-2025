@@ -4,3 +4,8 @@ matplotlib
 holidays
 scikit-learn
 geopy
+openmeteo-requests 
+retry-requests 
+pandas 
+numpy
+requests
