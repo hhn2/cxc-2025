@@ -1,3 +1,5 @@
 streamlit
 xgboost
 matplotlib
+holidays
+scikit-learn
