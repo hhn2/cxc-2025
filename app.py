@@ -113,6 +113,29 @@ def get_city_weather_daily(city, country, start_date, end_date):
         return None
 
 
+def get_forecast(city, country, days=7):
+    geolocator = Nominatim(user_agent="weather_app")
+    location = geolocator.geocode(f"{city}, {country}")
+
+    if not location:
+        return "Location not found"
+
+    base_url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": location.latitude,
+        "longitude": location.longitude,
+        "daily": ["temperature_2m_max", "temperature_2m_min", "precipitation_sum"],
+        "timezone": "auto",
+        "forecast_days": days
+    }
+
+    response = requests.get(base_url, params=params)
+
+    if response.status_code == 200:
+        return response.json()
+    else:
+        return f"Error: {response.status_code}"
+
 
 if uploaded_file:
     df = pd.read_csv(uploaded_file)
