@@ -76,7 +76,7 @@ def get_city_weather_daily(city, country, start_date, end_date):
         "longitude": lon,
         "start_date": start_date,
         "end_date": end_date,
-        "daily": ["temperature_2m_max", "temperature_2m_min", "temperature_2m_mean", 
+        "daily": ["temperature_2m_max", "temperature_2m_min", "temperature_2m_mean",
                   "relative_humidity_2m_mean", "precipitation_sum"],
         "timezone": "auto"
     }
@@ -87,14 +87,13 @@ def get_city_weather_daily(city, country, start_date, end_date):
         data = response.json()
 
         print("\n🔍 API Response:")
-        print(data)  # Print the raw response to check for missing keys
+        print(data)  # Debugging the response
 
-        # Check if 'daily' exists in the API response
         if "daily" not in data or "time" not in data["daily"]:
             st.error(f"❌ Unexpected API response format for {city}, {country}")
             return None
 
-        # Convert to DataFrame
+        # Create the DataFrame
         daily_weather = pd.DataFrame({
             "date": pd.to_datetime(data["daily"]["time"]).date,
             "city": city,
@@ -106,6 +105,11 @@ def get_city_weather_daily(city, country, start_date, end_date):
             "precipitation_sum": data["daily"].get("precipitation_sum", [np.nan] * len(data["daily"]["time"]))
         })
 
+        # Ensure all required columns exist
+        for col in ['max_temperature', 'min_temperature', 'avg_temperature', 'avg_humidity', 'precipitation_sum']:
+            if col not in daily_weather.columns:
+                daily_weather[col] = np.nan  # Create missing columns with NaN
+
         return daily_weather
 
     except Exception as e:
@@ -113,28 +117,48 @@ def get_city_weather_daily(city, country, start_date, end_date):
         return None
 
 
+
 def get_forecast(city, country, days=7):
     geolocator = Nominatim(user_agent="weather_app")
     location = geolocator.geocode(f"{city}, {country}")
 
     if not location:
-        return "Location not found"
+        return None  # Return None if location is not found
 
     base_url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": location.latitude,
         "longitude": location.longitude,
-        "daily": ["temperature_2m_max", "temperature_2m_min", "precipitation_sum"],
+        "daily": ["temperature_2m_max", "temperature_2m_min", "temperature_2m_mean",
+                  "relative_humidity_2m_mean", "precipitation_sum"],
         "timezone": "auto",
         "forecast_days": days
     }
 
     response = requests.get(base_url, params=params)
+    
+    if response.status_code != 200:
+        st.error(f"❌ Error fetching forecast: {response.status_code}")
+        return None  # Return None if the request fails
 
-    if response.status_code == 200:
-        return response.json()
-    else:
-        return f"Error: {response.status_code}"
+    data = response.json()
+    
+    if "daily" not in data or "time" not in data["daily"]:
+        st.error(f"❌ Unexpected forecast API response format")
+        return None
+
+    forecast_df = pd.DataFrame({
+        "date": pd.to_datetime(data["daily"]["time"]).date,
+        "city": city,
+        "country": country,
+        "max_temperature": data["daily"]["temperature_2m_max"],
+        "min_temperature": data["daily"]["temperature_2m_min"],
+        "avg_temperature": data["daily"]["temperature_2m_mean"],
+        "avg_humidity": data["daily"]["relative_humidity_2m_mean"],
+        "precipitation_sum": data["daily"]["precipitation_sum"]
+    })
+
+    return forecast_df
 
 
 if uploaded_file:
@@ -178,19 +202,38 @@ if uploaded_file:
         end_date = df_hourly['business_date'].max().strftime('%Y-%m-%d')
 
         if city:
-            st.info(f"🌍 Fetching weather for {city}, {country} ({start_date} - {end_date})...")
+            st.info(f"🌍 Fetching weather data for {city}, {country} ({start_date} - {end_date})...")
+
+            # Fetch historical weather data
             weather_df = get_city_weather_daily(city, country, start_date, end_date)
 
-            if weather_df is not None:
-                st.success(f"✅ Weather data fetched successfully for {city}!")
+            # Fetch 7-day weather forecast
+            forecast_df = get_forecast(city, country, days=7)
 
-                # Merge weather data
+            if weather_df is not None:
+                st.success(f"✅ Historical weather data fetched for {city}!")
                 df_hourly = df_hourly.merge(
                     weather_df,
                     left_on=['business_date'],
                     right_on=['date'],
                     how='left'
-                ).drop(columns=['date'])
+                ).drop(columns=['date'], errors='ignore')
+
+            if forecast_df is not None:
+                st.success(f"✅ 7-day weather forecast fetched for {city}!")
+                df_hourly = df_hourly.merge(
+                    forecast_df,
+                    left_on=['business_date'],
+                    right_on=['date'],
+                    how='left'
+                ).drop(columns=['date'], errors='ignore')
+
+            # Ensure all weather columns exist
+            for col in ['max_temperature', 'min_temperature', 'avg_temperature', 'avg_humidity', 'precipitation_sum']:
+                if col not in df_hourly.columns:
+                    df_hourly[col] = np.nan  # Create missing columns with NaN
+
+
         
         features = [
             'bill_total_net', 'bill_total_billed', 'payment_amount', 'num_people', 
