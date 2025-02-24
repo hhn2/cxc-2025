@@ -3,3 +3,4 @@ xgboost
 matplotlib
 holidays
 scikit-learn
+geopy
