@@ -4,14 +4,19 @@ import pickle
 import xgboost as xgb
 import matplotlib.pyplot as plt
 import numpy as np
+from geopy.geocoders import Nominatim
+import time
+import openmeteo_requests
+from retry_requests import retry
+import requests
 
 st.set_page_config(
     page_title="PromoPulse",
-    page_icon="📊",
+    page_icon="💸",
     layout="centered",
     initial_sidebar_state="expanded",
 )
-st.title("📊 PromoPulse")
+st.title("💸 PromoPulse")
 
 @st.cache_resource
 def load_model(model_filename):
@@ -21,8 +26,10 @@ def load_model(model_filename):
 ep_model = load_model("ep_model.pkl")  # Earnings Prediction Model
 pp_model = load_model("pp_model.pkl")  # Potential Earnings Prediction Model
 
-st.sidebar.title("🔘 Sidebar Controls")
+st.sidebar.title("*️⃣ Controls")
 country = st.sidebar.selectbox("Select the Country", options=["US", "CA"])
+city = st.sidebar.text_input("Type in a City")
+st.sidebar.caption("Make sure the city spelling is correct. ")
 uploaded_file = st.sidebar.file_uploader("Upload your CSV", type=["csv"])
 st.sidebar.markdown("Upload your restaurant's bill data (CSV) above. Ensure that you have the following data and match the names: ")
 st.sidebar.markdown("- bill_paid_at_local: Datetime when the bill was paid, in the venue's local timezone.")
@@ -44,6 +51,69 @@ required_columns = [
     'payment_total_tip', 'sales_revenue_with_tax'
 ]
 
+def get_city_coordinates(city, country):
+    geolocator = Nominatim(user_agent="weather_app")
+    try:
+        location = geolocator.geocode(f"{city}, {country}", exactly_one=True, timeout=10)
+        if location:
+            return (location.latitude, location.longitude)
+        else:
+            st.warning(f"⚠️ Could not find coordinates for {city}, {country}")
+            return None
+    except Exception as e:
+        st.error(f"❌ Error geocoding {city}, {country}: {e}")
+        return None
+
+def get_city_weather_daily(city, country, start_date, end_date):
+    coordinates = get_city_coordinates(city, country)
+    if not coordinates:
+        return None
+
+    lat, lon = coordinates
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "start_date": start_date,
+        "end_date": end_date,
+        "daily": ["temperature_2m_max", "temperature_2m_min", "temperature_2m_mean", 
+                  "relative_humidity_2m_mean", "precipitation_sum"],
+        "timezone": "auto"
+    }
+
+    try:
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
+
+        print("\n🔍 API Response:")
+        print(data)  # Print the raw response to check for missing keys
+
+        # Check if 'daily' exists in the API response
+        if "daily" not in data or "time" not in data["daily"]:
+            st.error(f"❌ Unexpected API response format for {city}, {country}")
+            return None
+
+        # Convert to DataFrame
+        daily_weather = pd.DataFrame({
+            "date": pd.to_datetime(data["daily"]["time"]).date,
+            "city": city,
+            "country": country,
+            "max_temperature": data["daily"].get("temperature_2m_max", [np.nan] * len(data["daily"]["time"])),
+            "min_temperature": data["daily"].get("temperature_2m_min", [np.nan] * len(data["daily"]["time"])),
+            "avg_temperature": data["daily"].get("temperature_2m_mean", [np.nan] * len(data["daily"]["time"])),
+            "avg_humidity": data["daily"].get("relative_humidity_2m_mean", [np.nan] * len(data["daily"]["time"])),
+            "precipitation_sum": data["daily"].get("precipitation_sum", [np.nan] * len(data["daily"]["time"]))
+        })
+
+        return daily_weather
+
+    except Exception as e:
+        st.error(f"❌ Error fetching weather for {city}, {country}: {e}")
+        return None
+
+
+
 if uploaded_file:
     df = pd.read_csv(uploaded_file)
     st.success("✅ Data Uploaded Successfully!")
@@ -57,11 +127,12 @@ if uploaded_file:
         df['hour'] = df['bill_paid_at_local'].dt.hour  
         df['day_of_week'] = df['bill_paid_at_local'].dt.dayofweek  # (0=Monday, 6=Sunday)
         df['is_weekend'] = df['day_of_week'].isin([5, 6]).astype(int)
+        df['business_date'] = df['bill_paid_at_local'].dt.date
 
         df['payment_per_person'] = df['payment_amount'] / df['num_people'].replace(0, np.nan)
         df['payment_per_person'] = df['payment_per_person'].fillna(0)  # Replace NaNs with 0
         
-        df_hourly = df.groupby([df['bill_paid_at_local'].dt.floor('H')]).agg({
+        df_hourly = df.groupby(['business_date', df['bill_paid_at_local'].dt.floor('H')]).agg({
             'bill_total_net': 'sum',  # Sum of net earnings
             'bill_total_billed': 'sum',  # Sum of billed amount
             'bill_total_discount_item_level': 'sum',  # Sum of discounts
@@ -79,9 +150,35 @@ if uploaded_file:
         }).reset_index()
         
         st.success("✅ Aggregated Data to Hourly Level Successfully!")
+
+        start_date = df_hourly['business_date'].min().strftime('%Y-%m-%d')
+        end_date = df_hourly['business_date'].max().strftime('%Y-%m-%d')
+
+        if city:
+            st.info(f"🌍 Fetching weather for {city}, {country} ({start_date} - {end_date})...")
+            weather_df = get_city_weather_daily(city, country, start_date, end_date)
+
+            if weather_df is not None:
+                st.success(f"✅ Weather data fetched successfully for {city}!")
+
+                # Merge weather data
+                df_hourly = df_hourly.merge(
+                    weather_df,
+                    left_on=['business_date'],
+                    right_on=['date'],
+                    how='left'
+                ).drop(columns=['date'])
         
-        features = ['bill_total_net', 'bill_total_billed', 'payment_amount', 'num_people', 
-                    'day_of_week', 'hour', 'is_weekend', 'payment_per_person']
+        features = [
+            'bill_total_net', 'bill_total_billed', 'payment_amount', 'num_people', 
+            'day_of_week', 'hour', 'is_weekend', 'payment_per_person',
+            'max_temperature', 'min_temperature', 'avg_temperature', 'avg_humidity', 'precipitation_sum'
+        ]
+
+        for col in ['max_temperature', 'min_temperature', 'avg_temperature', 'avg_humidity', 'precipitation_sum']:
+            df_hourly[col] = df_hourly[col].fillna(df_hourly[col].mean())
+
+        st.write(df_hourly.head(5))
         
         df_hourly['predicted_actual_earnings'] = ep_model.predict(df_hourly[features])
         df_hourly['predicted_potential_earnings'] = pp_model.predict(df_hourly[features])
