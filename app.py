@@ -3,6 +3,7 @@ import pandas as pd
 import pickle
 import xgboost as xgb
 import matplotlib.pyplot as plt
+import numpy as np
 
 @st.cache_resource
 def load_model(model_filename):
