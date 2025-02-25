@@ -5,7 +5,7 @@ import xgboost as xgb
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.preprocessing import StandardScaler
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 st.set_page_config(
     page_title="PromoPulse",
@@ -62,77 +62,51 @@ features = [
 def preprocess_input(df):
     """Prepares venue-level sequences for model inference."""
 
-    # Ensure datetime format
     df['bill_paid_at_local'] = pd.to_datetime(df['bill_paid_at_local'])
     df = df.sort_values(by="bill_paid_at_local").reset_index(drop=True)
 
-    # Group data at an hourly level
     df_hourly = df.groupby(df['bill_paid_at_local'].dt.floor('h')).agg({
-        'bill_total_net': 'sum',
-        'bill_total_billed': 'sum',
-        'bill_total_discount_item_level': 'sum',
-        'bill_total_gratuity': 'sum',
-        'bill_total_tax': 'sum',
-        'bill_total_voided': 'sum',
-        'payment_amount': 'sum',
-        'num_people': 'sum',
-        'payment_total_tip': 'sum',
-        'sales_revenue_with_tax': 'sum',
-        'holiday': 'first',
-        'is_weekend': 'first',
-        'day_of_week': 'first',
-        'hour_of_day': 'first',
+        'bill_total_net': 'sum', 'bill_total_billed': 'sum', 
+        'bill_total_discount_item_level': 'sum', 'bill_total_gratuity': 'sum',
+        'bill_total_tax': 'sum', 'bill_total_voided': 'sum', 
+        'payment_amount': 'sum', 'num_people': 'sum', 
+        'payment_total_tip': 'sum', 'sales_revenue_with_tax': 'sum',
+        'holiday': 'first', 'is_weekend': 'first',
+        'day_of_week': 'first', 'hour_of_day': 'first',
         'payment_per_person': 'mean'
     }).reset_index()
 
-    features = [
-        'bill_total_net', 'bill_total_billed', 'bill_total_discount_item_level',
-        'bill_total_gratuity', 'bill_total_tax', 'bill_total_voided',
-        'payment_amount', 'num_people', 'payment_total_tip', 'sales_revenue_with_tax',
-        'holiday', 'day_of_week', 'hour_of_day', 
-        'is_weekend', 'payment_per_person'
-    ]
-
-    # Apply saved scaler
+    # Normalize using saved scaler
     df_hourly[features] = scaler.transform(df_hourly[features])
 
-    # Match expected sequence length
-    required_hours = 2304  # Model was trained on sequences of this length
-
-    # If data has fewer hours than required, pad with zeros
+    # Ensure input shape consistency (last 2304 hours only)
+    required_hours = 2304
     if df_hourly.shape[0] < required_hours:
         pad_rows = required_hours - df_hourly.shape[0]
         pad_df = pd.DataFrame(np.zeros((pad_rows, len(features))), columns=features)
         df_hourly = pd.concat([pad_df, df_hourly], ignore_index=True)
 
-    # Keep only the most recent 2304 rows
-    df_hourly = df_hourly.iloc[-required_hours:]
+    df_hourly = df_hourly.iloc[-required_hours:]  # Keep only the last 2304 hours
 
-    # Preserve correct shape: (sequence_length, num_features)
-    X_hourly = df_hourly[features].values  # (2304, 15)
+    # ✅ Start predictions from **TODAY**
+    today = datetime.today().replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # Flattened version for `ep_model`
-    X_flattened = X_hourly.flatten().reshape(1, -1)  # (1, 34560)
+    # Generate timestamps for the next 168 hours
+    future_timestamps = pd.date_range(start=today, periods=168, freq='H')
 
-    latest_timestamp = df_hourly['bill_paid_at_local'].max()
-    future_timestamps = pd.date_range(
-        start=latest_timestamp + pd.Timedelta(hours=1),
-        periods=24 * 7,  # 7 days worth of hourly predictions
-        freq='H'
-    )
-
-    # ✅ Create a future DataFrame with empty values (to be predicted)
+    # ✅ Create a future DataFrame with timestamps & correct time-related features
     future_df = pd.DataFrame({'bill_paid_at_local': future_timestamps})
     future_df['hour_of_day'] = future_df['bill_paid_at_local'].dt.hour
     future_df['day_of_week'] = future_df['bill_paid_at_local'].dt.dayofweek
     future_df['is_weekend'] = future_df['day_of_week'].isin([5, 6]).astype(int)
-    future_df['holiday'] = 0  # Assume no holidays unless explicitly set
-    future_df[features] = 0  # Placeholder values (model will predict)
+    future_df['holiday'] = 0  # Default assumption: no holidays
+    future_df[features] = 0  # Placeholder values
 
-    # ✅ Append the future rows to df_hourly
-    df_hourly = pd.concat([df_hourly, future_df], ignore_index=True)
+    # ✅ Extract the last week's hourly revenue pattern
+    past_week_data = df_hourly.iloc[-168:]  # Get the last 168 hours
+    hourly_pattern = past_week_data['bill_total_net'] / past_week_data['bill_total_net'].sum()  # Normalize
 
-    return X_hourly, X_flattened, df_hourly
+    return df_hourly, future_df, future_df[features].values, hourly_pattern
 
 
 if uploaded_file:
@@ -144,67 +118,43 @@ if uploaded_file:
         else:
             st.success("✅ Data Uploaded Successfully!")
 
-            # Check for missing columns
-            missing_columns = [col for col in required_columns if col not in df.columns]
-            if missing_columns:
-                st.error(f"❌ Missing required columns: {', '.join(missing_columns)}")
-            else:
-                # ✅ Preprocess Input
-                X_hourly, X_flattened, df_hourly = preprocess_input(df)
+            df_hourly, future_df, X_future, hourly_pattern = preprocess_input(df)
 
-                # **Ensure `df_hourly` has exactly 2304 rows before applying predictions**
-                df_hourly = df_hourly.iloc[-2304:].reset_index(drop=True)  # Trim to match model input
+            expected_features_ep = ep_model.get_booster().num_features()
+            expected_features_pp = pp_model.get_booster().num_features()
 
-                # **Ensure correct feature count**
-                expected_features_ep = ep_model.get_booster().num_features()
-                expected_features_pp = pp_model.get_booster().num_features()
+            st.write(f"📏 `ep_model` expects {expected_features_ep} features")
+            st.write(f"📏 `pp_model` expects {expected_features_pp} features")
 
-                st.write(f"📏 `ep_model` expects {expected_features_ep} features")
-                st.write(f"📏 `pp_model` expects {expected_features_pp} features")
+            # ✅ Predict **total earnings for the next week**
+            predicted_weekly_total = ep_model.predict(X_future)[0]  # Single value
 
-                # ✅ Ensure `ep_model` input matches training format
-                if X_flattened.shape[1] < expected_features_ep:
-                    pad_size = expected_features_ep - X_flattened.shape[1]
-                    X_flattened = np.pad(X_flattened, ((0, 0), (0, pad_size)), mode='constant')
+            # ✅ Redistribute into hourly predictions based on historical pattern
+            future_df['predicted_actual_earnings'] = predicted_weekly_total * hourly_pattern.values
 
-                elif X_flattened.shape[1] > expected_features_ep:
-                    X_flattened = X_flattened[:, :expected_features_ep]  # Trim if too long
+            # ✅ Predict with `pp_model` for future 168 hours
+            future_df['predicted_potential_earnings'] = pp_model.predict(X_future)
 
-                # ✅ Predict with `ep_model`
-                predicted_actual = ep_model.predict(X_flattened)[0]  # Single prediction per venue
+            # Compute difference
+            future_df['potential_vs_actual'] = future_df['predicted_potential_earnings'] - future_df['predicted_actual_earnings']
 
-                # ✅ Predict with `pp_model`
-                if expected_features_pp == 15:
-                    df_hourly['predicted_potential_earnings'] = pp_model.predict(X_hourly)
-                else:
-                    df_hourly['predicted_potential_earnings'] = pp_model.predict(X_flattened)[0]
+            st.success("✅ Predictions Made Successfully!")
 
-                # ✅ Assign single venue-level `predicted_actual_earnings`
-                df_hourly['predicted_actual_earnings'] = predicted_actual  # Apply single value to all rows
-                df_hourly['potential_vs_actual'] = df_hourly['predicted_potential_earnings'] - df_hourly['predicted_actual_earnings']
+            # ✅ Display results
+            st.subheader("📊 Forecasted Hourly Data for Next 7 Days")
+            st.write(future_df[['bill_paid_at_local', 'hour_of_day', 'predicted_actual_earnings', 'predicted_potential_earnings', 'potential_vs_actual']])
 
-                st.success("✅ Predictions Made Successfully!")
+            # ✅ Plot results
+            st.subheader("📈 Forecasted Earnings for Next 7 Days")
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.plot(future_df['bill_paid_at_local'], future_df['predicted_actual_earnings'], label="Predicted Actual Earnings", marker="o")
+            ax.plot(future_df['bill_paid_at_local'], future_df['predicted_potential_earnings'], label="Predicted Potential Earnings", linestyle="dashed", marker="s")
+            ax.set_xlabel("Date & Time")
+            ax.set_ylabel("Earnings")
+            ax.set_title("Predicted Actual vs. Potential Earnings (Next 7 Days)")
+            ax.legend()
+            plt.xticks(rotation=45)
+            st.pyplot(fig)
 
-                # ✅ Display results
-                st.subheader("📊 Forecasted Hourly Data for Next 7 Days")
-                st.write(df_hourly[['bill_paid_at_local', 'hour_of_day', 'predicted_actual_earnings', 'predicted_potential_earnings', 'potential_vs_actual']].tail(168))
-
-                # ✅ Plot results
-                st.subheader("📈 Forecasted Earnings for Next 7 Days")
-                fig, ax = plt.subplots(figsize=(12, 6))
-                ax.plot(df_hourly['bill_paid_at_local'].tail(168), df_hourly['predicted_actual_earnings'].tail(168), label="Predicted Actual Earnings", marker="o")
-                ax.plot(df_hourly['bill_paid_at_local'].tail(168), df_hourly['predicted_potential_earnings'].tail(168), label="Predicted Potential Earnings", linestyle="dashed", marker="s")
-                ax.set_xlabel("Date & Time")
-                ax.set_ylabel("Earnings")
-                ax.set_title("Predicted Actual vs. Potential Earnings (Next 7 Days)")
-                ax.legend()
-                plt.xticks(rotation=45)
-                st.pyplot(fig)
-
-    except pd.errors.EmptyDataError:
-        st.error("❌ The uploaded file appears to be empty. Please upload a valid CSV file.")
-    except UnicodeDecodeError:
-        st.error("❌ Encoding error. Try re-saving the CSV file with UTF-8 encoding.")
     except Exception as e:
         st.error(f"❌ An error occurred: {str(e)}")
-
