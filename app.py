@@ -88,7 +88,7 @@ def preprocess_input(df):
     # Apply saved scaler
     df_hourly[features] = scaler.transform(df_hourly[features])
 
-    # ✅ Match expected sequence length
+    # Match expected sequence length
     required_hours = 2304  # Model was trained on sequences of this length
 
     # If data has fewer hours than required, pad with zeros
@@ -100,10 +100,10 @@ def preprocess_input(df):
     # Keep only the most recent 2304 rows
     df_hourly = df_hourly.iloc[-required_hours:]
 
-    # ✅ Preserve correct shape: (sequence_length, num_features)
+    # Preserve correct shape: (sequence_length, num_features)
     X_hourly = df_hourly[features].values  # (2304, 15)
 
-    # ✅ Flattened version for `ep_model`
+    # Flattened version for `ep_model`
     X_flattened = X_hourly.flatten().reshape(1, -1)  # (1, 34560)
 
     return X_hourly, X_flattened, df_hourly
@@ -123,7 +123,6 @@ if uploaded_file:
             if missing_columns:
                 st.error(f"❌ Missing required columns: {', '.join(missing_columns)}")
             else:
-                # ✅ Prepare inputs
                 X_hourly, X_flattened, df_hourly = preprocess_input(df)
 
                 # **Ensure correct feature count**
@@ -133,7 +132,7 @@ if uploaded_file:
                 st.write(f"📏 `ep_model` expects {expected_features_ep} features")
                 st.write(f"📏 `pp_model` expects {expected_features_pp} features")
 
-                # ✅ Apply correct shape to each model
+                # Apply correct shape to each model
                 if expected_features_ep == 15:
                     df_hourly['predicted_actual_earnings'] = ep_model.predict(X_hourly)
                 else:
@@ -148,11 +147,9 @@ if uploaded_file:
 
                 st.success("✅ Predictions Made Successfully!")
 
-                # ✅ Display results
                 st.subheader("📊 Aggregated Hourly Data with Predictions")
                 st.write(df_hourly[['bill_paid_at_local', 'hour_of_day', 'predicted_actual_earnings', 'predicted_potential_earnings', 'potential_vs_actual']])
 
-                # ✅ Plot results
                 st.subheader("📈 Actual Earnings vs. Potential Earnings")
                 fig, ax = plt.subplots(figsize=(12, 6))
                 ax.plot(df_hourly['hour_of_day'], df_hourly['predicted_actual_earnings'], label="Predicted Actual Earnings", marker="o")
