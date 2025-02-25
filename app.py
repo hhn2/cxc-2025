@@ -61,7 +61,6 @@ features = [
 
 def preprocess_input(df):
     """Prepares venue-level sequences for model inference."""
-
     df['bill_paid_at_local'] = pd.to_datetime(df['bill_paid_at_local'])
     df = df.sort_values(by="bill_paid_at_local").reset_index(drop=True)
 
@@ -123,17 +122,18 @@ if uploaded_file:
             expected_features_ep = ep_model.get_booster().num_features()
             expected_features_pp = pp_model.get_booster().num_features()
 
-            st.write(f"📏 `ep_model` expects {expected_features_ep} features")
-            st.write(f"📏 `pp_model` expects {expected_features_pp} features")
-
             # ✅ Predict **total earnings for the next week**
             predicted_weekly_total = ep_model.predict(X_future)[0]  # Single value
 
             # ✅ Redistribute into hourly predictions based on historical pattern
             future_df['predicted_actual_earnings'] = predicted_weekly_total * hourly_pattern.values
 
-            # ✅ Predict with `pp_model` for future 168 hours
-            future_df['predicted_potential_earnings'] = pp_model.predict(X_future)
+            # ✅ Predict with `pp_model` for each hourly row
+            future_df['predicted_potential_earnings'] = [
+                pp_model.predict(X_future[i].reshape(1, -1))[0] for i in range(X_future.shape[0])
+            ]
+
+            predicted_weekly_total = ep_model.predict(X_future)[0]  # Single value
 
             # Compute difference
             future_df['potential_vs_actual'] = future_df['predicted_potential_earnings'] - future_df['predicted_actual_earnings']
@@ -156,5 +156,20 @@ if uploaded_file:
             plt.xticks(rotation=45)
             st.pyplot(fig)
 
+            # ✅ Get Top 5 Hours with the Biggest Difference
+            st.subheader("🔥 Top 5 Hours with Highest Revenue Gap")
+            top_5_hours = future_df.nlargest(5, 'potential_vs_actual')
+            st.write(top_5_hours[['bill_paid_at_local', 'potential_vs_actual']])
+
+            # ✅ Bar Chart for Top 5 Hours
+            st.subheader("📊 Top 5 Hours with Highest Revenue Gap")
+            fig, ax = plt.subplots(figsize=(8, 4))
+            ax.barh(top_5_hours['bill_paid_at_local'].astype(str), top_5_hours['potential_vs_actual'], color='red')
+            ax.set_xlabel("Revenue Difference")
+            ax.set_ylabel("Timestamp")
+            ax.set_title("Top 5 Hours with Revenue Difference")
+            st.pyplot(fig)
+
     except Exception as e:
         st.error(f"❌ An error occurred: {str(e)}")
+
