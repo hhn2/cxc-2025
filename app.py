@@ -51,6 +51,14 @@ required_columns = [
     'payment_total_tip', 'sales_revenue_with_tax'
 ]
 
+features = [
+        'bill_total_net', 'bill_total_billed', 'bill_total_discount_item_level',
+        'bill_total_gratuity', 'bill_total_tax', 'bill_total_voided',
+        'payment_amount', 'num_people', 'payment_total_tip', 'sales_revenue_with_tax',
+        'holiday', 'day_of_week', 'hour_of_day', 
+        'is_weekend', 'payment_per_person'
+    ]
+
 def preprocess_input(df):
     """Prepares venue-level sequences for model inference."""
 
@@ -106,6 +114,24 @@ def preprocess_input(df):
     # Flattened version for `ep_model`
     X_flattened = X_hourly.flatten().reshape(1, -1)  # (1, 34560)
 
+    latest_timestamp = df_hourly['bill_paid_at_local'].max()
+    future_timestamps = pd.date_range(
+        start=latest_timestamp + pd.Timedelta(hours=1),
+        periods=24 * 7,  # 7 days worth of hourly predictions
+        freq='H'
+    )
+
+    # ✅ Create a future DataFrame with empty values (to be predicted)
+    future_df = pd.DataFrame({'bill_paid_at_local': future_timestamps})
+    future_df['hour_of_day'] = future_df['bill_paid_at_local'].dt.hour
+    future_df['day_of_week'] = future_df['bill_paid_at_local'].dt.dayofweek
+    future_df['is_weekend'] = future_df['day_of_week'].isin([5, 6]).astype(int)
+    future_df['holiday'] = 0  # Assume no holidays unless explicitly set
+    future_df[features] = 0  # Placeholder values (model will predict)
+
+    # ✅ Append the future rows to df_hourly
+    df_hourly = pd.concat([df_hourly, future_df], ignore_index=True)
+
     return X_hourly, X_flattened, df_hourly
 
 
@@ -123,7 +149,11 @@ if uploaded_file:
             if missing_columns:
                 st.error(f"❌ Missing required columns: {', '.join(missing_columns)}")
             else:
+                # ✅ Preprocess Input
                 X_hourly, X_flattened, df_hourly = preprocess_input(df)
+
+                # **Ensure `df_hourly` has exactly 2304 rows before applying predictions**
+                df_hourly = df_hourly.iloc[-2304:].reset_index(drop=True)  # Trim to match model input
 
                 # **Ensure correct feature count**
                 expected_features_ep = ep_model.get_booster().num_features()
@@ -132,32 +162,43 @@ if uploaded_file:
                 st.write(f"📏 `ep_model` expects {expected_features_ep} features")
                 st.write(f"📏 `pp_model` expects {expected_features_pp} features")
 
-                # Apply correct shape to each model
-                if expected_features_ep == 15:
-                    df_hourly['predicted_actual_earnings'] = ep_model.predict(X_hourly)
-                else:
-                    df_hourly['predicted_actual_earnings'] = ep_model.predict(X_flattened)[0]
+                # ✅ Ensure `ep_model` input matches training format
+                if X_flattened.shape[1] < expected_features_ep:
+                    pad_size = expected_features_ep - X_flattened.shape[1]
+                    X_flattened = np.pad(X_flattened, ((0, 0), (0, pad_size)), mode='constant')
 
+                elif X_flattened.shape[1] > expected_features_ep:
+                    X_flattened = X_flattened[:, :expected_features_ep]  # Trim if too long
+
+                # ✅ Predict with `ep_model`
+                predicted_actual = ep_model.predict(X_flattened)[0]  # Single prediction per venue
+
+                # ✅ Predict with `pp_model`
                 if expected_features_pp == 15:
                     df_hourly['predicted_potential_earnings'] = pp_model.predict(X_hourly)
                 else:
                     df_hourly['predicted_potential_earnings'] = pp_model.predict(X_flattened)[0]
 
+                # ✅ Assign single venue-level `predicted_actual_earnings`
+                df_hourly['predicted_actual_earnings'] = predicted_actual  # Apply single value to all rows
                 df_hourly['potential_vs_actual'] = df_hourly['predicted_potential_earnings'] - df_hourly['predicted_actual_earnings']
 
                 st.success("✅ Predictions Made Successfully!")
 
-                st.subheader("📊 Aggregated Hourly Data with Predictions")
-                st.write(df_hourly[['bill_paid_at_local', 'hour_of_day', 'predicted_actual_earnings', 'predicted_potential_earnings', 'potential_vs_actual']])
+                # ✅ Display results
+                st.subheader("📊 Forecasted Hourly Data for Next 7 Days")
+                st.write(df_hourly[['bill_paid_at_local', 'hour_of_day', 'predicted_actual_earnings', 'predicted_potential_earnings', 'potential_vs_actual']].tail(168))
 
-                st.subheader("📈 Actual Earnings vs. Potential Earnings")
+                # ✅ Plot results
+                st.subheader("📈 Forecasted Earnings for Next 7 Days")
                 fig, ax = plt.subplots(figsize=(12, 6))
-                ax.plot(df_hourly['hour_of_day'], df_hourly['predicted_actual_earnings'], label="Predicted Actual Earnings", marker="o")
-                ax.plot(df_hourly['hour_of_day'], df_hourly['predicted_potential_earnings'], label="Predicted Potential Earnings", linestyle="dashed", marker="s")
-                ax.set_xlabel("Hour of Day")
+                ax.plot(df_hourly['bill_paid_at_local'].tail(168), df_hourly['predicted_actual_earnings'].tail(168), label="Predicted Actual Earnings", marker="o")
+                ax.plot(df_hourly['bill_paid_at_local'].tail(168), df_hourly['predicted_potential_earnings'].tail(168), label="Predicted Potential Earnings", linestyle="dashed", marker="s")
+                ax.set_xlabel("Date & Time")
                 ax.set_ylabel("Earnings")
-                ax.set_title("Predicted Actual vs. Potential Earnings")
+                ax.set_title("Predicted Actual vs. Potential Earnings (Next 7 Days)")
                 ax.legend()
+                plt.xticks(rotation=45)
                 st.pyplot(fig)
 
     except pd.errors.EmptyDataError:
@@ -166,3 +207,4 @@ if uploaded_file:
         st.error("❌ Encoding error. Try re-saving the CSV file with UTF-8 encoding.")
     except Exception as e:
         st.error(f"❌ An error occurred: {str(e)}")
+
